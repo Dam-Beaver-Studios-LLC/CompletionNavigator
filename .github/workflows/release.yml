@@ -12,15 +12,28 @@ name: Package and release
 # first time in nineteen releases that the missing half was on this side.
 # Same job, same steps, one file: the steps that need a tag say so, the rest
 # run on every push, and `.\cn.ps1 release` waits for them before it tags.
+# THE RELEASE BRANCH, NOT EVERY BRANCH. 1.13.0.
+#
+# 1.12.0 wrote `'**'` and made every push to every branch run this job --
+# which for this repository is the mutation suite, the coverage run and the
+# performance budgets, twenty-five minutes of runner time, on work in
+# progress. The verification exists so the tag can wait for it, and a tag is
+# only ever cut from the release branch, so that is the only branch that
+# needs it.
 on:
   push:
     branches:
-      - '**'
+      - main
+      - master
     tags:
       - 'v*'
 
 permissions:
   contents: write
+
+  # Reading this repository's own previous runs, for the step below that asks
+  # whether this commit has already passed. 1.13.0.
+  actions: read
 
 jobs:
   release:
@@ -85,6 +98,42 @@ jobs:
             esac
           done
 
+      # HAS THIS COMMIT ALREADY PASSED? 1.13.0.
+      #
+      # 1.12.0 split this workflow so the checks run on the commit and the
+      # packaging waits for a tag -- and then `cn.ps1 release` pushes the
+      # commit and, once it is green, pushes the tag. Both pushes fire this
+      # job on the SAME commit, so the second one re-ran the mutation suite,
+      # the coverage run and the budgets against a tree that had just passed
+      # them. Fifty minutes of runner time to learn the same thing twice.
+      #
+      # This asks GitHub whether a completed, successful run already exists
+      # for this exact SHA, and the verification steps below stand down if one
+      # does. It is deliberately NOT "skip the checks on a tag": a tag pushed
+      # without a prior green run -- `-NoWait`, a `-Retag`, a tag pushed by
+      # hand -- finds nothing here and every check runs. The guarantee is
+      # "this commit passed", not "somebody ran the checks at some point".
+      - name: Has this commit already passed?
+        id: verified
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          COUNT=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${GITHUB_SHA}&status=success" \
+            --jq "[.workflow_runs[] | select(.id != ${GITHUB_RUN_ID})] | length" \
+            2>/dev/null || echo 0)
+
+          if [ "${COUNT:-0}" -gt 0 ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "$COUNT successful run(s) already exist for $GITHUB_SHA; the checks below will stand down."
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "No successful run exists for $GITHUB_SHA yet; every check will run."
+          fi
+
       # The Lua toolchain does NOT come from apt, deliberately.
       #
       # ubuntu-latest runs unattended-upgrades shortly after boot, which holds
@@ -96,12 +145,14 @@ jobs:
       # These actions download and build the toolchain into .lua/ in the
       # workspace. No package manager, no shared lock, nothing to contend with.
       - name: Install Lua
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 6
         uses: leafo/gh-actions-lua@v13
         with:
           luaVersion: "5.4"
 
       - name: Install LuaRocks
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 6
         uses: leafo/gh-actions-luarocks@v6
 
@@ -114,6 +165,7 @@ jobs:
       # plain `lua` and `luac`, so alias them rather than editing the command
       # in six places and breaking that parity check.
       - name: Install Lua tooling
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 6
         run: |
           luarocks install luacheck
@@ -148,6 +200,7 @@ jobs:
       # .lua-build and .luarocks in one rule, and covers whatever the next
       # tool decides to name its install directory.
       - name: Syntax check every Lua file
+        if: steps.verified.outputs.passed != 'true'
         run: |
           status=0
           count=0
@@ -181,6 +234,7 @@ jobs:
       # not touch this, which does the same job on the runner. A fix applied
       # to the instance somebody noticed rather than to the class.
       - name: Verify the .toc lists every Lua file
+        if: steps.verified.outputs.passed != 'true'
         run: |
           status=0
           toc=CompletionNavigator.toc
@@ -200,6 +254,7 @@ jobs:
       # the class of bug a stubbed test harness hides, because the harness
       # defines the very globals a typo would otherwise expose.
       - name: Lint
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 5
         run: luacheck . --no-color
 
@@ -220,6 +275,7 @@ jobs:
       #
       # 5.1 first, because it is the one that matters.
       - name: Run the offline harness on Lua 5.1 (the game's version)
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 5
         run: |
           if command -v lua5.1 >/dev/null 2>&1; then
@@ -230,6 +286,7 @@ jobs:
           fi
 
       - name: Run the offline harness
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 5
         run: |
           if [ -f harness.lua ]; then
@@ -258,6 +315,7 @@ jobs:
       # numbers side by side are how a real regression is told apart from an
       # interpreter difference.
       - name: Performance budgets
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 6
         run: |
           if [ ! -f bench.lua ]; then
@@ -308,6 +366,7 @@ jobs:
       # step passes using more than two thirds of its budget, which is how
       # this was found.
       - name: Mutation testing
+        if: steps.verified.outputs.passed != 'true'
         continue-on-error: true
         timeout-minutes: 15
         run: |
@@ -330,6 +389,7 @@ jobs:
       # A missing developer tool should not. Users do not care whether the
       # author's coverage report generated.
       - name: Coverage
+        if: steps.verified.outputs.passed != 'true'
         continue-on-error: true
         timeout-minutes: 6
         run: bash coverage.sh . 85

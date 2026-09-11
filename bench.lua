@@ -115,23 +115,52 @@ end
 -- Nobody remembers. Recording them means CI can fail on one.
 CN_BENCH_RESULTS = {}
 
+-- THE FASTEST RUN, NOT THE AVERAGE OF A CONTENDED ONE. 1.13.0.
+--
+-- The ratio budgets divide one measurement by another, and a mean over a
+-- single batch drifts independently for each -- so on a busy machine the two
+-- halves of a ratio pick up different amounts of other people's work and the
+-- gate fails with nothing wrong. Observed: the 200-vs-90 shape ratio reads
+-- 4.99x to 5.03x on an idle container and 5.76x against a 5.60x ceiling while
+-- the coverage run was going, and this project's own release rehearsal runs
+-- exactly that way -- mutation, coverage and budgets back to back. A shared
+-- GitHub runner is worse.
+--
+-- The minimum is the right statistic for "how fast can this go": noise only
+-- ever ADDS time, so the best of a few batches is the closest thing to the
+-- work itself. Three batches rather than ten -- the point is to drop an
+-- outlier, not to characterise a distribution, and the full budget run has to
+-- stay inside its step cap.
+--
+-- This does NOT make a regression harder to see. A real regression is slower
+-- in every batch, so the minimum moves with it; only the noise is dropped.
+local BATCHES = 3
+
 local function bench(label, iterations, fn)
     -- Warm up, so the first-call cost of building any lazy index is not
     -- charged to the measurement.
     fn()
 
-    local started = os.clock()
-    for _ = 1, iterations do fn() end
-    local elapsed = (os.clock() - started) * 1000
+    local best
 
-    local perCall = elapsed / iterations
+    for _ = 1, BATCHES do
+        local started = os.clock()
+        for _ = 1, iterations do fn() end
+        local elapsed = (os.clock() - started) * 1000
 
-    print(string.format("  %-38s %8.3f ms/call  (%d iterations)",
-        label, perCall, iterations))
+        local perCall = elapsed / iterations
 
-    CN_BENCH_RESULTS[label] = perCall
+        if not best or perCall < best then
+            best = perCall
+        end
+    end
 
-    return perCall
+    print(string.format("  %-38s %8.3f ms/call  (%d iterations, best of %d)",
+        label, best, iterations, BATCHES))
+
+    CN_BENCH_RESULTS[label] = best
+
+    return best
 end
 
 print("\nData scale:")

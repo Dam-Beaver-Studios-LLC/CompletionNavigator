@@ -763,6 +763,9 @@ blocking_allowed = {
     # was comparing against anything.
     "Performance budgets",
     "Verify the CurseForge token is available", "Package and upload",
+    # Reads one API answer and writes one output. It cannot fail for any
+    # reason but a broken API call, and it falls back to "run everything".
+    "Has this commit already passed?",
 }
 
 steps = re.findall(r"- name: (.+?)\n(.*?)(?=\n      - name: |\Z)", text, re.S)
@@ -838,15 +841,101 @@ for name in every_push:
         problems.append("'%s' is guarded to tags, so it still runs for the "
                         "first time after the point of no return" % name)
 
+# AND THE SAME COMMIT IS NOT VERIFIED TWICE. 1.13.0.
+#
+# `cn.ps1 release` pushes the commit and, once it is green, pushes the tag.
+# Both fire this job on the SAME commit, so the tag run re-ran the mutation
+# suite, the coverage run and the budgets against a tree that had just passed
+# them -- fifty minutes of runner time to learn the same thing twice.
+gate = "Has this commit already passed?"
+
+if gate not in steps:
+    problems.append("nothing asks whether this commit already passed, so a "
+                    "tag re-runs every check the push just ran")
+elif GUARD not in steps[gate]:
+    problems.append("the '%s' gate runs on every push; on a push there is by "
+                    "definition no prior run to find" % gate)
+
+STAND_DOWN = "steps.verified.outputs.passed != 'true'"
+
+for name in every_push:
+    if name in steps and STAND_DOWN not in steps[name]:
+        problems.append("'%s' runs again on the tag even when the identical "
+                        "commit has already passed" % name)
+
+# AND THE GATE FAILS OPEN. A tag pushed without a prior run -- -NoWait, a
+# -Retag, a tag pushed by hand -- must find nothing and run everything. A gate
+# that skipped the checks merely BECAUSE this is a tag would publish
+# unverified, which is the opposite of what 1.12.0 was for.
+if gate in steps and "passed=false" not in steps[gate]:
+    problems.append("the gate has no negative branch, so it cannot tell "
+                    "'already verified' from 'never verified'")
+
+# The branch list. `'**'` ran this suite on every work-in-progress push.
+#
+# MATCHED ON THE STRUCTURE, NOT ON THE TEXT. The first version of this scan
+# searched the header for the literal `'**'` and found it in the comment
+# explaining why `'**'` was wrong -- a check failing on its own subject matter.
+# That is the third scan in three releases to count its own text.
+if re.search(r"branches:\s*\n\s*-\s*'\*\*'", text):
+    problems.append("the workflow runs on every branch; a tag is only ever "
+                    "cut from the release branch")
+
 if problems:
     print("FAIL: the workflow's two halves are not split correctly")
     for problem in problems:
         print("  " + problem)
     sys.exit(1)
 
-print("    %d step(s) wait for a tag, %d run on every push"
-      % (len(tag_only), len(every_push)))
+print("    %d step(s) wait for a tag, %d run on every push, %d stand down when "
+      "the commit already passed" % (len(tag_only), len(every_push),
+                                     len(every_push)))
 SPLIT
+
+echo "  budgets: a busy machine must not fail a release"
+# THE FASTEST RUN, NOT THE AVERAGE OF A CONTENDED ONE. 1.13.0.
+#
+# The ratio budgets divide one measurement by another, and a mean over a
+# single batch drifts independently for each -- so on a busy machine the two
+# halves pick up different amounts of other people's work and the gate fails
+# with nothing wrong. Observed here: the 200-vs-90 shape ratio reads 4.99x to
+# 5.03x idle and 5.76x against a 5.60x ceiling while the coverage run was
+# going. This project's own release rehearsal runs exactly that way, and a
+# shared GitHub runner is worse.
+#
+# A budget that fails on a busy machine is a budget that teaches the author to
+# re-run it, which is the same outcome as not having one.
+python3 - /home/claude/cn/bench.lua <<'BUDGETNOISE'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+body = text.split("local function bench(")[1].split("\nend")[0]
+
+problems = []
+
+if "BATCHES" not in body:
+    problems.append("the benchmark measures one batch, so a contended machine "
+                    "moves each half of a ratio budget independently")
+
+if "perCall < best" not in body:
+    problems.append("the benchmark does not keep the fastest batch; noise only "
+                    "ever adds time, so the minimum is the measurement and the "
+                    "mean is the measurement plus whatever else the machine "
+                    "was doing")
+
+# And the recorded number is the one the budgets read.
+if "CN_BENCH_RESULTS[label] = best" not in text:
+    problems.append("the budgets read a number the benchmark did not settle on")
+
+if problems:
+    print("FAIL: the budgets can fail on runner noise")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    best of N batches, so noise cannot fail a release")
+BUDGETNOISE
 
 echo "  release: the commit is pushed before the tag is cut"
 # The commit is the thing being tested and is cheap to supersede. The tag is

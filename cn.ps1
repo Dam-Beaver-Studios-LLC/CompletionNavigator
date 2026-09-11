@@ -78,7 +78,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '1.12.0'
+$script:ToolkitVersion = '1.13.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -126,7 +126,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "1.12.0"
+CN.version     = "1.13.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -62474,7 +62474,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 1.12.0
+## Version: 1.13.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -62729,6 +62729,62 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [1.13.0]
+
+**1.12.0 made the checks run before the tag, and made them run twice.**
+
+`cn.ps1 release` pushes the commit and, once it is green, pushes the tag. Both
+pushes fire the workflow on the *same* commit — so the second run repeated the
+mutation suite, the coverage run and the performance budgets against a tree
+that had just passed them. Fifty minutes of runner time to learn the same
+thing twice. And `branches: '**'` ran all of it on every push to every branch,
+including work in progress.
+
+### Fixed
+
+- **A commit is verified once.** A step on the tag run asks GitHub whether a
+  completed, successful run already exists for this exact SHA — excluding the
+  run asking the question, which is itself in that list — and the eleven
+  verification steps stand down if one does. It is deliberately not "skip the
+  checks on a tag": a tag pushed without a prior green run (`-NoWait`, a
+  `-Retag`, a tag pushed by hand) finds nothing and every check runs. The
+  guarantee is *this commit passed*, not *somebody ran the checks at some
+  point*. The release rehearsal asserts the negative branch exists, because
+  without it this change quietly becomes "tags are never checked" — which is
+  the opposite of what 1.12.0 was for.
+
+- **The release branch, not every branch.** `'**'` was a wider door than the
+  change needed: twenty-five minutes of mutation, coverage and budgets on
+  every work-in-progress push. A tag is only ever cut from the release branch.
+
+- **A busy machine could fail a release on nothing.** The performance budgets
+  include ratio gates — 200 stops against 90, to catch a change in the shape of
+  the curve rather than its height — and each half was a mean over a single
+  batch. On a contended machine the two halves pick up different amounts of
+  other people's work, so the ratio drifts: it reads 4.99x to 5.03x on an idle
+  container and 5.76x against a 5.60x ceiling while the coverage run is going.
+  This project's own release rehearsal runs mutation, coverage and budgets back
+  to back, and a shared GitHub runner is worse. The benchmark now keeps the
+  fastest of three batches: noise only ever *adds* time, so the minimum is the
+  work itself, and a real regression is slower in every batch and still moves
+  it. A budget that fails on a busy machine teaches you to re-run it, which is
+  the same as not having one.
+
+### Not done, deliberately
+
+- **`ImproveRoute` was left alone.** It is the largest measured path in the
+  addon at 17.5 ms for a 200-stop route, and its 2-opt inner loop takes three
+  square roots per candidate swap where two would do — the edge leaving a
+  segment does not depend on the segment's start, and could be cached. It was
+  not, for two reasons. The path sits at 29% of its 60 ms budget and every
+  other measured path is further inside its own. And the last optimisation of
+  this exact loop — 0.57.0's don't-look bits — silently produced *longer*
+  routes for 290 of 3,000 cases, worst case 27.7%, while its release notes
+  said "exactly the same route"; a cache with an invalidation rule is the same
+  class of risk in the same twenty lines. Speeding up a function that is
+  comfortably inside budget, by the technique that last broke it, is not a
+  trade worth making.
 
 ## [1.12.0]
 
@@ -71099,7 +71155,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-1.12.0
+1.13.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -71117,15 +71173,28 @@ name: Package and release
 # first time in nineteen releases that the missing half was on this side.
 # Same job, same steps, one file: the steps that need a tag say so, the rest
 # run on every push, and `.\cn.ps1 release` waits for them before it tags.
+# THE RELEASE BRANCH, NOT EVERY BRANCH. 1.13.0.
+#
+# 1.12.0 wrote `'**'` and made every push to every branch run this job --
+# which for this repository is the mutation suite, the coverage run and the
+# performance budgets, twenty-five minutes of runner time, on work in
+# progress. The verification exists so the tag can wait for it, and a tag is
+# only ever cut from the release branch, so that is the only branch that
+# needs it.
 on:
   push:
     branches:
-      - '**'
+      - main
+      - master
     tags:
       - 'v*'
 
 permissions:
   contents: write
+
+  # Reading this repository's own previous runs, for the step below that asks
+  # whether this commit has already passed. 1.13.0.
+  actions: read
 
 jobs:
   release:
@@ -71190,6 +71259,42 @@ jobs:
             esac
           done
 
+      # HAS THIS COMMIT ALREADY PASSED? 1.13.0.
+      #
+      # 1.12.0 split this workflow so the checks run on the commit and the
+      # packaging waits for a tag -- and then `cn.ps1 release` pushes the
+      # commit and, once it is green, pushes the tag. Both pushes fire this
+      # job on the SAME commit, so the second one re-ran the mutation suite,
+      # the coverage run and the budgets against a tree that had just passed
+      # them. Fifty minutes of runner time to learn the same thing twice.
+      #
+      # This asks GitHub whether a completed, successful run already exists
+      # for this exact SHA, and the verification steps below stand down if one
+      # does. It is deliberately NOT "skip the checks on a tag": a tag pushed
+      # without a prior green run -- `-NoWait`, a `-Retag`, a tag pushed by
+      # hand -- finds nothing here and every check runs. The guarantee is
+      # "this commit passed", not "somebody ran the checks at some point".
+      - name: Has this commit already passed?
+        id: verified
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          COUNT=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${GITHUB_SHA}&status=success" \
+            --jq "[.workflow_runs[] | select(.id != ${GITHUB_RUN_ID})] | length" \
+            2>/dev/null || echo 0)
+
+          if [ "${COUNT:-0}" -gt 0 ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "$COUNT successful run(s) already exist for $GITHUB_SHA; the checks below will stand down."
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "No successful run exists for $GITHUB_SHA yet; every check will run."
+          fi
+
       # The Lua toolchain does NOT come from apt, deliberately.
       #
       # ubuntu-latest runs unattended-upgrades shortly after boot, which holds
@@ -71201,12 +71306,14 @@ jobs:
       # These actions download and build the toolchain into .lua/ in the
       # workspace. No package manager, no shared lock, nothing to contend with.
       - name: Install Lua
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 6
         uses: leafo/gh-actions-lua@v13
         with:
           luaVersion: "5.4"
 
       - name: Install LuaRocks
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 6
         uses: leafo/gh-actions-luarocks@v6
 
@@ -71219,6 +71326,7 @@ jobs:
       # plain `lua` and `luac`, so alias them rather than editing the command
       # in six places and breaking that parity check.
       - name: Install Lua tooling
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 6
         run: |
           luarocks install luacheck
@@ -71253,6 +71361,7 @@ jobs:
       # .lua-build and .luarocks in one rule, and covers whatever the next
       # tool decides to name its install directory.
       - name: Syntax check every Lua file
+        if: steps.verified.outputs.passed != 'true'
         run: |
           status=0
           count=0
@@ -71286,6 +71395,7 @@ jobs:
       # not touch this, which does the same job on the runner. A fix applied
       # to the instance somebody noticed rather than to the class.
       - name: Verify the .toc lists every Lua file
+        if: steps.verified.outputs.passed != 'true'
         run: |
           status=0
           toc=CompletionNavigator.toc
@@ -71305,6 +71415,7 @@ jobs:
       # the class of bug a stubbed test harness hides, because the harness
       # defines the very globals a typo would otherwise expose.
       - name: Lint
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 5
         run: luacheck . --no-color
 
@@ -71325,6 +71436,7 @@ jobs:
       #
       # 5.1 first, because it is the one that matters.
       - name: Run the offline harness on Lua 5.1 (the game's version)
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 5
         run: |
           if command -v lua5.1 >/dev/null 2>&1; then
@@ -71335,6 +71447,7 @@ jobs:
           fi
 
       - name: Run the offline harness
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 5
         run: |
           if [ -f harness.lua ]; then
@@ -71363,6 +71476,7 @@ jobs:
       # numbers side by side are how a real regression is told apart from an
       # interpreter difference.
       - name: Performance budgets
+        if: steps.verified.outputs.passed != 'true'
         timeout-minutes: 6
         run: |
           if [ ! -f bench.lua ]; then
@@ -71413,6 +71527,7 @@ jobs:
       # step passes using more than two thirds of its budget, which is how
       # this was found.
       - name: Mutation testing
+        if: steps.verified.outputs.passed != 'true'
         continue-on-error: true
         timeout-minutes: 15
         run: |
@@ -71435,6 +71550,7 @@ jobs:
       # A missing developer tool should not. Users do not care whether the
       # author's coverage report generated.
       - name: Coverage
+        if: steps.verified.outputs.passed != 'true'
         continue-on-error: true
         timeout-minutes: 6
         run: bash coverage.sh . 85
@@ -121507,23 +121623,52 @@ end
 -- Nobody remembers. Recording them means CI can fail on one.
 CN_BENCH_RESULTS = {}
 
+-- THE FASTEST RUN, NOT THE AVERAGE OF A CONTENDED ONE. 1.13.0.
+--
+-- The ratio budgets divide one measurement by another, and a mean over a
+-- single batch drifts independently for each -- so on a busy machine the two
+-- halves of a ratio pick up different amounts of other people's work and the
+-- gate fails with nothing wrong. Observed: the 200-vs-90 shape ratio reads
+-- 4.99x to 5.03x on an idle container and 5.76x against a 5.60x ceiling while
+-- the coverage run was going, and this project's own release rehearsal runs
+-- exactly that way -- mutation, coverage and budgets back to back. A shared
+-- GitHub runner is worse.
+--
+-- The minimum is the right statistic for "how fast can this go": noise only
+-- ever ADDS time, so the best of a few batches is the closest thing to the
+-- work itself. Three batches rather than ten -- the point is to drop an
+-- outlier, not to characterise a distribution, and the full budget run has to
+-- stay inside its step cap.
+--
+-- This does NOT make a regression harder to see. A real regression is slower
+-- in every batch, so the minimum moves with it; only the noise is dropped.
+local BATCHES = 3
+
 local function bench(label, iterations, fn)
     -- Warm up, so the first-call cost of building any lazy index is not
     -- charged to the measurement.
     fn()
 
-    local started = os.clock()
-    for _ = 1, iterations do fn() end
-    local elapsed = (os.clock() - started) * 1000
+    local best
 
-    local perCall = elapsed / iterations
+    for _ = 1, BATCHES do
+        local started = os.clock()
+        for _ = 1, iterations do fn() end
+        local elapsed = (os.clock() - started) * 1000
 
-    print(string.format("  %-38s %8.3f ms/call  (%d iterations)",
-        label, perCall, iterations))
+        local perCall = elapsed / iterations
 
-    CN_BENCH_RESULTS[label] = perCall
+        if not best or perCall < best then
+            best = perCall
+        end
+    end
 
-    return perCall
+    print(string.format("  %-38s %8.3f ms/call  (%d iterations, best of %d)",
+        label, best, iterations, BATCHES))
+
+    CN_BENCH_RESULTS[label] = best
+
+    return best
 end
 
 print("\nData scale:")
@@ -123113,6 +123258,9 @@ blocking_allowed = {
     # was comparing against anything.
     "Performance budgets",
     "Verify the CurseForge token is available", "Package and upload",
+    # Reads one API answer and writes one output. It cannot fail for any
+    # reason but a broken API call, and it falls back to "run everything".
+    "Has this commit already passed?",
 }
 
 steps = re.findall(r"- name: (.+?)\n(.*?)(?=\n      - name: |\Z)", text, re.S)
@@ -123188,15 +123336,101 @@ for name in every_push:
         problems.append("'%s' is guarded to tags, so it still runs for the "
                         "first time after the point of no return" % name)
 
+# AND THE SAME COMMIT IS NOT VERIFIED TWICE. 1.13.0.
+#
+# `cn.ps1 release` pushes the commit and, once it is green, pushes the tag.
+# Both fire this job on the SAME commit, so the tag run re-ran the mutation
+# suite, the coverage run and the budgets against a tree that had just passed
+# them -- fifty minutes of runner time to learn the same thing twice.
+gate = "Has this commit already passed?"
+
+if gate not in steps:
+    problems.append("nothing asks whether this commit already passed, so a "
+                    "tag re-runs every check the push just ran")
+elif GUARD not in steps[gate]:
+    problems.append("the '%s' gate runs on every push; on a push there is by "
+                    "definition no prior run to find" % gate)
+
+STAND_DOWN = "steps.verified.outputs.passed != 'true'"
+
+for name in every_push:
+    if name in steps and STAND_DOWN not in steps[name]:
+        problems.append("'%s' runs again on the tag even when the identical "
+                        "commit has already passed" % name)
+
+# AND THE GATE FAILS OPEN. A tag pushed without a prior run -- -NoWait, a
+# -Retag, a tag pushed by hand -- must find nothing and run everything. A gate
+# that skipped the checks merely BECAUSE this is a tag would publish
+# unverified, which is the opposite of what 1.12.0 was for.
+if gate in steps and "passed=false" not in steps[gate]:
+    problems.append("the gate has no negative branch, so it cannot tell "
+                    "'already verified' from 'never verified'")
+
+# The branch list. `'**'` ran this suite on every work-in-progress push.
+#
+# MATCHED ON THE STRUCTURE, NOT ON THE TEXT. The first version of this scan
+# searched the header for the literal `'**'` and found it in the comment
+# explaining why `'**'` was wrong -- a check failing on its own subject matter.
+# That is the third scan in three releases to count its own text.
+if re.search(r"branches:\s*\n\s*-\s*'\*\*'", text):
+    problems.append("the workflow runs on every branch; a tag is only ever "
+                    "cut from the release branch")
+
 if problems:
     print("FAIL: the workflow's two halves are not split correctly")
     for problem in problems:
         print("  " + problem)
     sys.exit(1)
 
-print("    %d step(s) wait for a tag, %d run on every push"
-      % (len(tag_only), len(every_push)))
+print("    %d step(s) wait for a tag, %d run on every push, %d stand down when "
+      "the commit already passed" % (len(tag_only), len(every_push),
+                                     len(every_push)))
 SPLIT
+
+echo "  budgets: a busy machine must not fail a release"
+# THE FASTEST RUN, NOT THE AVERAGE OF A CONTENDED ONE. 1.13.0.
+#
+# The ratio budgets divide one measurement by another, and a mean over a
+# single batch drifts independently for each -- so on a busy machine the two
+# halves pick up different amounts of other people's work and the gate fails
+# with nothing wrong. Observed here: the 200-vs-90 shape ratio reads 4.99x to
+# 5.03x idle and 5.76x against a 5.60x ceiling while the coverage run was
+# going. This project's own release rehearsal runs exactly that way, and a
+# shared GitHub runner is worse.
+#
+# A budget that fails on a busy machine is a budget that teaches the author to
+# re-run it, which is the same outcome as not having one.
+python3 - /home/claude/cn/bench.lua <<'BUDGETNOISE'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+body = text.split("local function bench(")[1].split("\nend")[0]
+
+problems = []
+
+if "BATCHES" not in body:
+    problems.append("the benchmark measures one batch, so a contended machine "
+                    "moves each half of a ratio budget independently")
+
+if "perCall < best" not in body:
+    problems.append("the benchmark does not keep the fastest batch; noise only "
+                    "ever adds time, so the minimum is the measurement and the "
+                    "mean is the measurement plus whatever else the machine "
+                    "was doing")
+
+# And the recorded number is the one the budgets read.
+if "CN_BENCH_RESULTS[label] = best" not in text:
+    problems.append("the budgets read a number the benchmark did not settle on")
+
+if problems:
+    print("FAIL: the budgets can fail on runner noise")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    best of N batches, so noise cannot fail a release")
+BUDGETNOISE
 
 echo "  release: the commit is pushed before the tag is cut"
 # The commit is the thing being tested and is cheap to supersede. The tag is
@@ -123512,7 +123746,9 @@ EXTRACT
 
 # Steps that cannot be simulated here, with the reason stated rather than
 # silently skipped. A skip nobody can see is how a step stops being checked.
-SKIP_PATTERN='^(Fetch tags|Verify a tag points at HEAD)$'
+# `Has this commit already passed?` calls the GitHub API through `gh`, which
+# is a question about a repository this rehearsal does not have. 1.13.0.
+SKIP_PATTERN='^(Fetch tags|Verify a tag points at HEAD|Has this commit already passed\?)$'
 
 status=0
 ran=0

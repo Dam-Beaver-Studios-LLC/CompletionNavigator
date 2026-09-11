@@ -171,7 +171,9 @@ EXTRACT
 
 # Steps that cannot be simulated here, with the reason stated rather than
 # silently skipped. A skip nobody can see is how a step stops being checked.
-SKIP_PATTERN='^(Fetch tags|Verify a tag points at HEAD)$'
+# `Has this commit already passed?` calls the GitHub API through `gh`, which
+# is a question about a repository this rehearsal does not have. 1.13.0.
+SKIP_PATTERN='^(Fetch tags|Verify a tag points at HEAD|Has this commit already passed\?)$'
 
 status=0
 ran=0

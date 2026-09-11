@@ -7,6 +7,62 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.13.0]
+
+**1.12.0 made the checks run before the tag, and made them run twice.**
+
+`cn.ps1 release` pushes the commit and, once it is green, pushes the tag. Both
+pushes fire the workflow on the *same* commit â€” so the second run repeated the
+mutation suite, the coverage run and the performance budgets against a tree
+that had just passed them. Fifty minutes of runner time to learn the same
+thing twice. And `branches: '**'` ran all of it on every push to every branch,
+including work in progress.
+
+### Fixed
+
+- **A commit is verified once.** A step on the tag run asks GitHub whether a
+  completed, successful run already exists for this exact SHA â€” excluding the
+  run asking the question, which is itself in that list â€” and the eleven
+  verification steps stand down if one does. It is deliberately not "skip the
+  checks on a tag": a tag pushed without a prior green run (`-NoWait`, a
+  `-Retag`, a tag pushed by hand) finds nothing and every check runs. The
+  guarantee is *this commit passed*, not *somebody ran the checks at some
+  point*. The release rehearsal asserts the negative branch exists, because
+  without it this change quietly becomes "tags are never checked" â€” which is
+  the opposite of what 1.12.0 was for.
+
+- **The release branch, not every branch.** `'**'` was a wider door than the
+  change needed: twenty-five minutes of mutation, coverage and budgets on
+  every work-in-progress push. A tag is only ever cut from the release branch.
+
+- **A busy machine could fail a release on nothing.** The performance budgets
+  include ratio gates â€” 200 stops against 90, to catch a change in the shape of
+  the curve rather than its height â€” and each half was a mean over a single
+  batch. On a contended machine the two halves pick up different amounts of
+  other people's work, so the ratio drifts: it reads 4.99x to 5.03x on an idle
+  container and 5.76x against a 5.60x ceiling while the coverage run is going.
+  This project's own release rehearsal runs mutation, coverage and budgets back
+  to back, and a shared GitHub runner is worse. The benchmark now keeps the
+  fastest of three batches: noise only ever *adds* time, so the minimum is the
+  work itself, and a real regression is slower in every batch and still moves
+  it. A budget that fails on a busy machine teaches you to re-run it, which is
+  the same as not having one.
+
+### Not done, deliberately
+
+- **`ImproveRoute` was left alone.** It is the largest measured path in the
+  addon at 17.5 ms for a 200-stop route, and its 2-opt inner loop takes three
+  square roots per candidate swap where two would do â€” the edge leaving a
+  segment does not depend on the segment's start, and could be cached. It was
+  not, for two reasons. The path sits at 29% of its 60 ms budget and every
+  other measured path is further inside its own. And the last optimisation of
+  this exact loop â€” 0.57.0's don't-look bits â€” silently produced *longer*
+  routes for 290 of 3,000 cases, worst case 27.7%, while its release notes
+  said "exactly the same route"; a cache with an invalidation rule is the same
+  class of risk in the same twenty lines. Speeding up a function that is
+  comfortably inside budget, by the technique that last broke it, is not a
+  trade worth making.
+
 ## [1.12.0]
 
 **Every check that has ever failed this project's build failed after the tag
