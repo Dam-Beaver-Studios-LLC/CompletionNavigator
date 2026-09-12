@@ -7,6 +7,36 @@ Authored by Travis A. Bryan I.
 
 ## [Unreleased]
 
+## [1.14.0]
+
+**`.\cn.ps1 check` said "All checks passed" on a machine where it had never
+parsed a single Lua file.**
+
+Two of its verifications are skipped when the tool or the recording is absent
+â€” the syntax check needs `luac` on PATH, the stub audit needs a captured
+recording â€” and both were written as grey notes while the summary went on
+claiming everything passed. The sentence is true and is read, correctly, as a
+claim about the repository.
+
+Navigator Data's toolkit learned this in its 0.18.0, for exactly the same
+reason and with the same argument: reporting an absent tool as a FAILURE
+trains you to ignore the command, which is the one thing a check must never
+do. That argument is right and it produced the wrong fix over there too. This
+is the carry-across, and it is the twentieth check to exist in one of these
+two toolchains and not the other.
+
+### Fixed
+
+- **Skips are counted, named, and printed in the summary.** `skip  the syntax
+  check` in its own colour, and a bottom line that reads "Everything that could
+  run here passed. 1 verification(s) skipped: the syntax check. CI runs all of
+  them." Still not a failure, still the same non-blocking behaviour â€” the
+  bottom line simply can no longer overstate what was done.
+
+- **The release rehearsal asserts it by name.** Both skip sites are checked
+  individually rather than counted, because a scan that only counted skips
+  would pass on a command that had stopped skipping by no longer checking.
+
 ## [1.13.0]
 
 **1.12.0 made the checks run before the tag, and made them run twice.**

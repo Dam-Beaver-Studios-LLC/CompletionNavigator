@@ -44,7 +44,13 @@ echo "    test tooling present and excluded from the .toc"
 
 echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
-grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
+# EITHER VERDICT. 1.14.0 split the summary in two: "All checks passed, and
+# none were skipped" when everything ran, and "Everything that could run here
+# passed" when something did not -- and this rehearsal has no game client, so
+# the stub audit always skips here. Matching only the first sentence would
+# make every assertion below a test of whether a WoW install happens to be on
+# the machine.
+grep -qE "All checks passed|Everything that could run here passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
 
 echo "  the release workflow's own steps, run here"
 # FOUR RELEASES WERE TAGGED, PUSHED, AND NEVER PUBLISHED.
@@ -101,7 +107,7 @@ lua5.4 -e 'local f, e = loadfile("fixtures/captured.lua"); if not f then error(e
   || { echo "FAIL: the recording cn.ps1 fixtures wrote is not loadable Lua"; head -12 fixtures/captured.lua; exit 1; }
 
 $PWSH -NoProfile -File ./cn.ps1 check > fixcheck2.log 2>&1
-grep -q "All checks passed" fixcheck2.log \
+grep -qE "All checks passed|Everything that could run here passed" fixcheck2.log \
   || { echo "FAIL: check rejects a recording this toolkit just wrote"; cat fixcheck2.log; exit 1; }
 
 rm -rf fixtures svcapture.sv
@@ -149,7 +155,7 @@ $PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q 'more than once' \
 
 mv Locales/enUS.bak Locales/enUS.lua
 $PWSH -NoProfile -File ./cn.ps1 check > localecheck.log 2>&1
-grep -q "All checks passed" localecheck.log \
+grep -qE "All checks passed|Everything that could run here passed" localecheck.log \
   || { echo "FAIL: the shipped locales do not pass their own lint"; cat localecheck.log; exit 1; }
 echo "    named, blocking, and the shipped locales are complete"
 
@@ -167,7 +173,7 @@ mkdir -p fixtures
 printf 'return { interface = 120100 }\n' > fixtures/captured.lua
 
 $PWSH -NoProfile -File ./cn.ps1 check > fixcheck.log 2>&1
-grep -q "All checks passed" fixcheck.log \
+grep -qE "All checks passed|Everything that could run here passed" fixcheck.log \
   || { echo "FAIL: a captured fixture must not fail check"; cat fixcheck.log; exit 1; }
 
 # THE WORKFLOW'S OWN RULE, NOT A COPY OF IT.
@@ -250,7 +256,7 @@ $PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q "last reviewed for 0.0.1" \
   || { echo "FAIL: a stale project-page review must block the release"; exit 1; }
 mv _curseforge/REVIEWED.bak _curseforge/REVIEWED.txt
 $PWSH -NoProfile -File ./cn.ps1 check > check2.log 2>&1
-grep -q "All checks passed" check2.log \
+grep -qE "All checks passed|Everything that could run here passed" check2.log \
   || { echo "FAIL: check does not pass once the page is reviewed"; cat check2.log; exit 1; }
 
 echo "  release guard: wrong version"
@@ -273,7 +279,7 @@ $PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q "but the tree on disk is 0.
 mv Core.bak Core.lua
 sed -i 's/^## Version: 0.0.1/## Version: '"$VERSION"'/' CompletionNavigator.toc
 $PWSH -NoProfile -File ./cn.ps1 check > check3.log 2>&1
-grep -q "All checks passed" check3.log \
+grep -qE "All checks passed|Everything that could run here passed" check3.log \
   || { echo "FAIL: check does not pass once the tree is current"; cat check3.log; exit 1; }
 
 git init -q -b main . && git config user.email t@e.com && git config user.name T
@@ -891,6 +897,60 @@ print("    %d step(s) wait for a tag, %d run on every push, %d stand down when "
       "the commit already passed" % (len(tag_only), len(every_push),
                                      len(every_push)))
 SPLIT
+
+echo "  check: a verification that could not run is not one that passed"
+# 1.14.0. Navigator Data's toolkit learned this in its 0.18.0 and the defect
+# here was identical: the syntax check and the stub audit are skipped when the
+# tool or the recording is absent, both were written as grey notes, and the
+# summary went on saying "All checks passed." That sentence is true and is
+# read as a claim about the repository -- and on a machine with no `luac` on
+# PATH, which is the author's, no Lua file in the addon is ever parsed by this
+# command while it prints green.
+python3 - /home/claude/cn/ps/cn.body.ps1 <<'SKIPS'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+body = text.split("function Invoke-CNCheck {")[1].split("\n}\n")[0]
+
+problems = []
+
+if "Write-CNCheckSkip" not in text:
+    problems.append("there is no writer for a check that could not run")
+
+if "$script:CheckSkips += $What" not in text:
+    problems.append("skips are not counted, so the summary cannot name them")
+
+# THE TWO THAT ACTUALLY SKIP. Named, because a scan that only counted skips
+# would pass on a command that had stopped skipping by no longer checking.
+for phrase, what in (("no luac on PATH", "the syntax check"),
+                     ("no game client on this machine", "the stub audit")):
+    line = [l for l in body.splitlines() if phrase in l]
+
+    if not line:
+        problems.append("'%s' is not reported at all any more" % phrase)
+    elif "Write-CNCheckSkip" not in line[0]:
+        problems.append("'%s' is announced as a note rather than a skip, so "
+                        "the summary will overstate what ran" % phrase)
+
+# AND THE SUMMARY READS THE COUNTER.
+summary = body.split("if ($problems -eq 0)")[-1]
+
+if "CheckSkips.Count -eq 0" not in summary:
+    problems.append("the summary does not distinguish a clean run from one "
+                    "that skipped")
+
+if "none were skipped" not in summary or "skipped:" not in summary:
+    problems.append("the summary does not name what was skipped")
+
+if problems:
+    print("FAIL: check can claim more than it did")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    skips counted and named, and the summary says so")
+SKIPS
 
 echo "  budgets: a busy machine must not fail a release"
 # THE FASTEST RUN, NOT THE AVERAGE OF A CONTENDED ONE. 1.13.0.

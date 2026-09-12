@@ -78,7 +78,7 @@ $script:DataMark   = '-- CN:DATA:QUESTS'
 # This exists because a stale cn.ps1 is otherwise invisible: it scaffolds a
 # previous release over a newer tree, reports success, and every downstream
 # step then fails for reasons that look unrelated.
-$script:ToolkitVersion = '1.13.0'
+$script:ToolkitVersion = '1.14.0'
 
 # The repository the CI commands ask about. Derived from the git remote when
 # there is one, so a fork does not report the upstream's builds.
@@ -126,7 +126,7 @@ local ADDON_NAME, CN = ...
 _G.CompletionNavigator = CN
 
 CN.name        = ADDON_NAME
-CN.version     = "1.13.0"
+CN.version     = "1.14.0"
 CN.dbVersion   = 39
 
 -- Where the addon's own textures live. Referenced by the .toc IconTexture
@@ -62474,7 +62474,7 @@ $Embedded['CompletionNavigator.toc'] = @'
 ## Title: Completion Navigator
 ## Notes: Intelligent completion planning, prioritization, and navigation.
 ## Author: Travis A. Bryan I
-## Version: 1.13.0
+## Version: 1.14.0
 ## SavedVariables: CompletionNavigatorDB
 ## OptionalDeps: TomTom, AllTheThings, BtWQuests, HandyNotes
 ## X-Category: Quests & Leveling
@@ -62729,6 +62729,36 @@ Completion Navigator is a product of Dam Beaver Studios, LLC.
 Authored by Travis A. Bryan I.
 
 ## [Unreleased]
+
+## [1.14.0]
+
+**`.\cn.ps1 check` said "All checks passed" on a machine where it had never
+parsed a single Lua file.**
+
+Two of its verifications are skipped when the tool or the recording is absent
+— the syntax check needs `luac` on PATH, the stub audit needs a captured
+recording — and both were written as grey notes while the summary went on
+claiming everything passed. The sentence is true and is read, correctly, as a
+claim about the repository.
+
+Navigator Data's toolkit learned this in its 0.18.0, for exactly the same
+reason and with the same argument: reporting an absent tool as a FAILURE
+trains you to ignore the command, which is the one thing a check must never
+do. That argument is right and it produced the wrong fix over there too. This
+is the carry-across, and it is the twentieth check to exist in one of these
+two toolchains and not the other.
+
+### Fixed
+
+- **Skips are counted, named, and printed in the summary.** `skip  the syntax
+  check` in its own colour, and a bottom line that reads "Everything that could
+  run here passed. 1 verification(s) skipped: the syntax check. CI runs all of
+  them." Still not a failure, still the same non-blocking behaviour — the
+  bottom line simply can no longer overstate what was done.
+
+- **The release rehearsal asserts it by name.** Both skip sites are checked
+  individually rather than counted, because a scan that only counted skips
+  would pass on a command that had stopped skipping by no longer checking.
 
 ## [1.13.0]
 
@@ -71155,7 +71185,7 @@ it ends up inside a web form that cannot be diffed.
 '@
 
 $Embedded['_curseforge\REVIEWED.txt'] = @'
-1.13.0
+1.14.0
 '@
 
 $Embedded['.github\workflows\release.yml'] = @'
@@ -122539,7 +122569,13 @@ echo "    test tooling present and excluded from the .toc"
 
 echo "  check"
 $PWSH -NoProfile -File ./cn.ps1 check > check.log 2>&1
-grep -q "All checks passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
+# EITHER VERDICT. 1.14.0 split the summary in two: "All checks passed, and
+# none were skipped" when everything ran, and "Everything that could run here
+# passed" when something did not -- and this rehearsal has no game client, so
+# the stub audit always skips here. Matching only the first sentence would
+# make every assertion below a test of whether a WoW install happens to be on
+# the machine.
+grep -qE "All checks passed|Everything that could run here passed" check.log || { echo "FAIL: fresh scaffold does not pass check"; cat check.log; exit 1; }
 
 echo "  the release workflow's own steps, run here"
 # FOUR RELEASES WERE TAGGED, PUSHED, AND NEVER PUBLISHED.
@@ -122596,7 +122632,7 @@ lua5.4 -e 'local f, e = loadfile("fixtures/captured.lua"); if not f then error(e
   || { echo "FAIL: the recording cn.ps1 fixtures wrote is not loadable Lua"; head -12 fixtures/captured.lua; exit 1; }
 
 $PWSH -NoProfile -File ./cn.ps1 check > fixcheck2.log 2>&1
-grep -q "All checks passed" fixcheck2.log \
+grep -qE "All checks passed|Everything that could run here passed" fixcheck2.log \
   || { echo "FAIL: check rejects a recording this toolkit just wrote"; cat fixcheck2.log; exit 1; }
 
 rm -rf fixtures svcapture.sv
@@ -122644,7 +122680,7 @@ $PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q 'more than once' \
 
 mv Locales/enUS.bak Locales/enUS.lua
 $PWSH -NoProfile -File ./cn.ps1 check > localecheck.log 2>&1
-grep -q "All checks passed" localecheck.log \
+grep -qE "All checks passed|Everything that could run here passed" localecheck.log \
   || { echo "FAIL: the shipped locales do not pass their own lint"; cat localecheck.log; exit 1; }
 echo "    named, blocking, and the shipped locales are complete"
 
@@ -122662,7 +122698,7 @@ mkdir -p fixtures
 printf 'return { interface = 120100 }\n' > fixtures/captured.lua
 
 $PWSH -NoProfile -File ./cn.ps1 check > fixcheck.log 2>&1
-grep -q "All checks passed" fixcheck.log \
+grep -qE "All checks passed|Everything that could run here passed" fixcheck.log \
   || { echo "FAIL: a captured fixture must not fail check"; cat fixcheck.log; exit 1; }
 
 # THE WORKFLOW'S OWN RULE, NOT A COPY OF IT.
@@ -122745,7 +122781,7 @@ $PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q "last reviewed for 0.0.1" \
   || { echo "FAIL: a stale project-page review must block the release"; exit 1; }
 mv _curseforge/REVIEWED.bak _curseforge/REVIEWED.txt
 $PWSH -NoProfile -File ./cn.ps1 check > check2.log 2>&1
-grep -q "All checks passed" check2.log \
+grep -qE "All checks passed|Everything that could run here passed" check2.log \
   || { echo "FAIL: check does not pass once the page is reviewed"; cat check2.log; exit 1; }
 
 echo "  release guard: wrong version"
@@ -122768,7 +122804,7 @@ $PWSH -NoProfile -File ./cn.ps1 check 2>&1 | grep -q "but the tree on disk is 0.
 mv Core.bak Core.lua
 sed -i 's/^## Version: 0.0.1/## Version: '"$VERSION"'/' CompletionNavigator.toc
 $PWSH -NoProfile -File ./cn.ps1 check > check3.log 2>&1
-grep -q "All checks passed" check3.log \
+grep -qE "All checks passed|Everything that could run here passed" check3.log \
   || { echo "FAIL: check does not pass once the tree is current"; cat check3.log; exit 1; }
 
 git init -q -b main . && git config user.email t@e.com && git config user.name T
@@ -123386,6 +123422,60 @@ print("    %d step(s) wait for a tag, %d run on every push, %d stand down when "
       "the commit already passed" % (len(tag_only), len(every_push),
                                      len(every_push)))
 SPLIT
+
+echo "  check: a verification that could not run is not one that passed"
+# 1.14.0. Navigator Data's toolkit learned this in its 0.18.0 and the defect
+# here was identical: the syntax check and the stub audit are skipped when the
+# tool or the recording is absent, both were written as grey notes, and the
+# summary went on saying "All checks passed." That sentence is true and is
+# read as a claim about the repository -- and on a machine with no `luac` on
+# PATH, which is the author's, no Lua file in the addon is ever parsed by this
+# command while it prints green.
+python3 - /home/claude/cn/ps/cn.body.ps1 <<'SKIPS'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+
+body = text.split("function Invoke-CNCheck {")[1].split("\n}\n")[0]
+
+problems = []
+
+if "Write-CNCheckSkip" not in text:
+    problems.append("there is no writer for a check that could not run")
+
+if "$script:CheckSkips += $What" not in text:
+    problems.append("skips are not counted, so the summary cannot name them")
+
+# THE TWO THAT ACTUALLY SKIP. Named, because a scan that only counted skips
+# would pass on a command that had stopped skipping by no longer checking.
+for phrase, what in (("no luac on PATH", "the syntax check"),
+                     ("no game client on this machine", "the stub audit")):
+    line = [l for l in body.splitlines() if phrase in l]
+
+    if not line:
+        problems.append("'%s' is not reported at all any more" % phrase)
+    elif "Write-CNCheckSkip" not in line[0]:
+        problems.append("'%s' is announced as a note rather than a skip, so "
+                        "the summary will overstate what ran" % phrase)
+
+# AND THE SUMMARY READS THE COUNTER.
+summary = body.split("if ($problems -eq 0)")[-1]
+
+if "CheckSkips.Count -eq 0" not in summary:
+    problems.append("the summary does not distinguish a clean run from one "
+                    "that skipped")
+
+if "none were skipped" not in summary or "skipped:" not in summary:
+    problems.append("the summary does not name what was skipped")
+
+if problems:
+    print("FAIL: check can claim more than it did")
+    for problem in problems:
+        print("  " + problem)
+    sys.exit(1)
+
+print("    skips counted and named, and the summary says so")
+SKIPS
 
 echo "  budgets: a busy machine must not fail a release"
 # THE FASTEST RUN, NOT THE AVERAGE OF A CONTENDED ONE. 1.13.0.
@@ -126496,8 +126586,40 @@ function Invoke-CNCI {
     }
 }
 
+# A CHECK THAT COULD NOT RUN IS NOT A CHECK THAT PASSED. 1.14.0.
+#
+# Navigator Data's toolkit learned this in its 0.18.0, and the reasoning is
+# reproduced here because the defect is identical and this is the side that
+# still had it. Two of this command's verifications -- the syntax check and
+# the stub audit -- are skipped when the tool or the recording is absent, and
+# both were written as grey notes while the summary went on saying "All checks
+# passed."
+#
+# That sentence is true and is read, correctly, as a claim about the
+# repository. On a machine with no `luac` on PATH, every Lua file in the addon
+# goes unparsed and the command prints green; the author's own machine is such
+# a machine, so the strongest structural check this command has had never once
+# run where it is actually run.
+#
+# NOT a failure, for the reason 0.15.0 gave over there: reporting an absent
+# tool as broken trains the author to ignore the command, which is the one
+# thing a check must never do. Counted and named instead, and the bottom line
+# can no longer overstate what was done.
+$script:CheckSkips = @()
+
+function Write-CNCheckSkip {
+    param([string] $What, [string] $Why)
+
+    Write-Host "  skip  $What" -ForegroundColor DarkYellow
+    Write-Host "        $Why" -ForegroundColor DarkGray
+
+    $script:CheckSkips += $What
+}
+
 function Invoke-CNCheck {
     $problems = 0
+
+    $script:CheckSkips = @()
 
     Write-Host 'Completion Navigator :: check' -ForegroundColor Cyan
     Write-Host ''
@@ -126964,6 +127086,9 @@ function Invoke-CNCheck {
             $problems++
         }
         elseif ($null -eq $recordedInterface) {
+            # A note, not a skip: the audit RAN. What is unknown is which
+            # client the recording came from, which is a weaker claim than
+            # "this did not happen".
             Write-Host '  note  the recording predates 0.46.0 and carries no client version; re-capture when convenient' -ForegroundColor DarkGray
         }
         else {
@@ -126977,7 +127102,8 @@ function Invoke-CNCheck {
         $problems++
     }
     else {
-        Write-Host '  note  no game client on this machine; stub audit not possible here' -ForegroundColor DarkGray
+        Write-CNCheckSkip 'the stub audit' ('no game client on this machine, so the harness stubs are ' +
+            'unverified against any real one. In game: /cn capture, then .\cn.ps1 fixtures')
     }
 
     # Optional real syntax check if a Lua binary is on PATH.
@@ -127001,13 +127127,21 @@ function Invoke-CNCheck {
         Write-Host "  ok    syntax checked with $($luac.Name)" -ForegroundColor DarkGray
     }
     else {
-        Write-Host '  note  no luac on PATH; syntax not verified. (winget install DEVCOM.Lua)' -ForegroundColor DarkGray
+        Write-CNCheckSkip 'the syntax check' ('no luac on PATH, so no Lua file in this addon was parsed. ' +
+            'CI parses every one of them.  winget install DEVCOM.Lua')
     }
 
     Write-Host ''
 
     if ($problems -eq 0) {
-        Write-Host "All checks passed. $($onDisk.Count) Lua files." -ForegroundColor Green
+        if ($script:CheckSkips.Count -eq 0) {
+            Write-Host "All checks passed, and none were skipped. $($onDisk.Count) Lua files." -ForegroundColor Green
+        }
+        else {
+            # THE BOTTOM LINE SAYS WHAT WAS NOT DONE. See `Write-CNCheckSkip`.
+            Write-Host "Everything that could run here passed. $($onDisk.Count) Lua files." -ForegroundColor Green
+            Write-Host "$($script:CheckSkips.Count) verification(s) skipped: $($script:CheckSkips -join ', '). CI runs all of them." -ForegroundColor DarkYellow
+        }
     }
     else {
         Write-Host "$problems problem(s) found." -ForegroundColor Yellow
